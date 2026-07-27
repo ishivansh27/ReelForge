@@ -1,0 +1,80 @@
+# ---- Phase 1: API, database, auth, background jobs ----
+# Heavy AI/ML libraries (opencv, librosa, demucs, whisper, CLIP, PySceneDetect,
+# Remotion renderer glue) are intentionally NOT in this file yet.
+# They get added in the phase where we actually build the analysis pipeline,
+# so today's install stays small, fast, and free-tier friendly.
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Settings / env
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+email-validator==2.2.0
+
+# Database
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 predates bcrypt 4.1+ (which removed the __about__ module
+# and started raising on the passlib self-test); pin a compatible bcrypt.
+bcrypt==4.0.1
+
+# Background jobs
+celery==5.4.0
+redis==5.2.1
+
+# Storage (AWS S3)
+boto3==1.35.90
+
+# Reference video download
+# yt-dlp is pinned loosely and expected to need frequent bumps -- Instagram/
+# YouTube change their internals often enough that old pins silently break.
+# If downloads start failing, try `pip install -U yt-dlp` first.
+yt-dlp==2026.7.4
+
+# Video analysis -- scene cut detection (CPU-only, no GPU needed)
+opencv-python==5.0.0.93
+scenedetect==0.7.1
+
+# Audio analysis -- BPM/beat detection (CPU-only, no GPU needed)
+librosa==0.11.0
+# av (PyAV) bundles its own FFmpeg libraries inside the wheel, so we can
+# decode audio out of the downloaded .mp4 without a separate system
+# ffmpeg install.
+av==18.0.0
+
+# AI asset matching (CLIP embeddings + face detection).
+# torch is installed from the CPU-only wheel index -- avoids pulling
+# down CUDA libraries we can't use anyway (no dedicated GPU on this
+# laptop). Runs fine on CPU for single-image embeddings; this is much
+# lighter than Whisper/Demucs, which is why it wasn't deferred like
+# those were. Install with:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install open_clip_torch
+torch==2.13.0
+open_clip_torch==3.3.0
+# scipy comes in as a librosa dependency already; used here for
+# scipy.optimize.linear_sum_assignment (optimal slot<->asset matching).
+
+# Text overlay OCR -- requires the Tesseract-OCR system binary too
+# (installed separately, e.g. `winget install UB-Mannheim.TesseractOCR`
+# on Windows, `apt install tesseract-ocr` on Linux). pytesseract is
+# just a thin wrapper around that binary, not an OCR engine itself.
+pytesseract==0.3.13
+
+# Payments (used later, harmless to install now)
+stripe==11.4.1
+
+# ---- Dev/test only ----
+# moto simulates real AWS services locally so we can test the S3 upload
+# flow (presigned URLs, real HTTP PUT, HeadObject) without a real AWS
+# account. Not used by the running app itself.
+moto[s3]==5.0.28

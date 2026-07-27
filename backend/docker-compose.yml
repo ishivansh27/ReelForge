@@ -1,0 +1,43 @@
+# Brings up Postgres + Redis locally with one command:
+#   docker compose up -d
+#
+# This is the recommended way to run the database on your own laptop --
+# it avoids installing Postgres/Redis natively on Windows, and it matches
+# exactly what we'll use in the cloud later.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: reelapp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: reelapp
+      POSTGRES_PASSWORD: reelapp_local_password
+      POSTGRES_DB: reelapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reelapp -d reelapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: reelapp_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
