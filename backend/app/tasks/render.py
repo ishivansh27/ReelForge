@@ -206,6 +206,16 @@ def run_render_job(self, render_job_id: str) -> None:
                 job.progress_percent = int((i + 1) / len(segments) * 50)  # downloads: 0-50%
                 db.commit()
 
+            # Beat-sync only means anything against the reference's own
+            # music, so the final render's soundtrack is the reference
+            # video's audio track, not each matched clip's native audio
+            # (mixing N different clips' own audio would fight the
+            # beat-synced cut points instead of matching them).
+            audio_source_path = None
+            if (blueprint.beat_map or {}).get("has_audio") and blueprint.source_video_s3_key:
+                audio_source_path = str(Path(tmpdir) / "reference_audio_source.mp4")
+                download_file_from_s3(blueprint.source_video_s3_key, audio_source_path)
+
             output_path = str(Path(tmpdir) / "final_render.mp4")
             render_final_video(
                 local_segments,
@@ -215,6 +225,7 @@ def run_render_job(self, render_job_id: str) -> None:
                 output_path,
                 transitions=transition_types,
                 color_profile=color_profile,
+                audio_source_path=audio_source_path,
             )
             job.progress_percent = 90
             db.commit()
