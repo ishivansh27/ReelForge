@@ -127,6 +127,7 @@ def render_final_video(
     output_path: str,
     transitions: list = None,
     color_profile: dict = None,
+    audio_source_path: str = None,
 ) -> None:
     """
     segments: ordered list of {"path": str, "is_photo": bool, "duration": float,
@@ -142,6 +143,13 @@ def render_final_video(
     color_profile: optional dict from app.services.color_grade.analyze_color_profile,
     applied identically to every segment (matched footage and gap-fill
     alike) so the whole output reads as one consistent grade.
+
+    audio_source_path: optional path to a video/audio file whose audio
+    track becomes the final render's soundtrack -- normally the
+    reference video itself, since beat-sync only means anything against
+    the reference's own music. Padded with silence if shorter than the
+    final render, trimmed if longer. None (e.g. the reference had no
+    audio track at all) produces a silent render, same as before.
     """
     if transitions is None:
         transitions = ["cut"] * (len(segments) - 1)
@@ -200,19 +208,24 @@ def render_final_video(
             acc_label = out_label
 
         filters.append(f"[{acc_label}]format=yuv420p[outv]")
-        filter_complex = ";".join(filters)
 
-        cmd += [
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[outv]",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            output_path,
-        ]
+        output_args = ["-map", "[outv]", "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+
+        if audio_source_path:
+            audio_input_index = len(segments)
+            cmd += ["-i", audio_source_path]
+            # apad first (pads with silence up to acc_duration if the
+            # reference's audio is shorter -- e.g. it looped or a
+            # trailing scene ran past where the music stopped), then
+            # atrim enforces the exact upper bound if it's longer.
+            filters.append(
+                f"[{audio_input_index}:a]apad=whole_dur={acc_duration},"
+                f"atrim=0:{acc_duration},asetpts=PTS-STARTPTS[outa]"
+            )
+            output_args += ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+
+        filter_complex = ";".join(filters)
+        cmd += ["-filter_complex", filter_complex, *output_args, output_path]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:

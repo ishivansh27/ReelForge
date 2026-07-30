@@ -18,9 +18,11 @@ from app.models.user import User
 from app.models.user_asset import UploadStatus, UserAsset
 from app.schemas.asset_slot import AssetSlotAssignRequest, AssetSlotOut
 from app.schemas.blueprint import BlueprintOut
+from app.schemas.media import MediaUrlOut
 from app.schemas.project import ProjectCreate, ProjectOut
 from app.schemas.render_job import RenderJobOut
 from app.schemas.user_asset import UserAssetOut
+from app.services.s3 import DOWNLOAD_URL_EXPIRE_SECONDS, generate_presigned_get
 from app.tasks.asset_matching import match_assets_to_slots
 from app.tasks.download import download_reference_video
 from app.tasks.gap_fill import generate_gap_fills
@@ -53,6 +55,19 @@ def _to_asset_slot_out(s: AssetSlot) -> AssetSlotOut:
         match_confidence=s.match_confidence,
         is_manual=s.is_manual,
         gap_fill_s3_key=s.gap_fill_s3_key,
+    )
+
+
+@router.get("", response_model=list[ProjectOut])
+def list_projects(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(Project)
+        .filter(Project.user_id == current_user.id)
+        .order_by(Project.created_at.desc())
+        .all()
     )
 
 
@@ -240,6 +255,16 @@ def override_asset_slot(
         slot.match_confidence = None  # manually chosen, not AI-scored
         slot.is_manual = True
 
+        # A manual assignment is just as valid a way to reach "matched"
+        # as the AI auto-match task -- without this, a project matched
+        # entirely by hand never leaves awaiting_assets (the AI task is
+        # the only other place this transition happens, and it exits
+        # before touching status whenever every slot is already manual,
+        # i.e. exactly the case here), which would permanently block
+        # gap-fill and render even though every slot is resolved.
+        if project.status == ProjectStatus.awaiting_assets:
+            project.status = ProjectStatus.matching
+
     db.commit()
     db.refresh(slot)
     return _to_asset_slot_out(slot)
@@ -275,7 +300,13 @@ def trigger_render(
     if project is None or project.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    if project.status != ProjectStatus.matching:
+    # `completed` is included alongside `matching` so a project can be
+    # re-rendered after its first render already finished -- e.g. after
+    # swapping a matched asset, or (the actual case that surfaced this)
+    # picking up a render-pipeline fix that didn't exist yet for the
+    # first render. Every other status means the asset slots aren't
+    # necessarily resolved yet, so those are still rejected.
+    if project.status not in (ProjectStatus.matching, ProjectStatus.completed):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Project isn't ready to render yet (status: {project.status.value})",
@@ -318,3 +349,84 @@ def list_render_jobs(
         .order_by(RenderJob.created_at.desc())
         .all()
     )
+
+
+def _media_url(key: str | None) -> MediaUrlOut:
+    if key is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No file available yet")
+    return MediaUrlOut(url=generate_presigned_get(key), expires_in=DOWNLOAD_URL_EXPIRE_SECONDS)
+
+
+@router.get("/{project_id}/reference-video-url", response_model=MediaUrlOut)
+def get_reference_video_url(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = db.get(Project, project_id)
+    if project is None or project.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    blueprint = db.query(Blueprint).filter(Blueprint.project_id == project_id).first()
+    if blueprint is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blueprint not created yet")
+
+    return _media_url(blueprint.source_video_s3_key)
+
+
+@router.get("/{project_id}/assets/{asset_id}/url", response_model=MediaUrlOut)
+def get_asset_url(
+    project_id: uuid.UUID,
+    asset_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = db.get(Project, project_id)
+    if project is None or project.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    asset = db.get(UserAsset, asset_id)
+    if asset is None or asset.project_id != project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+
+    return _media_url(asset.s3_key)
+
+
+@router.get("/{project_id}/asset-requirements/{slot_id}/gap-fill-url", response_model=MediaUrlOut)
+def get_gap_fill_url(
+    project_id: uuid.UUID,
+    slot_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = db.get(Project, project_id)
+    if project is None or project.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    blueprint = db.query(Blueprint).filter(Blueprint.project_id == project_id).first()
+    if blueprint is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blueprint not created yet")
+
+    slot = db.get(AssetSlot, slot_id)
+    if slot is None or slot.blueprint_id != blueprint.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slot not found")
+
+    return _media_url(slot.gap_fill_s3_key)
+
+
+@router.get("/{project_id}/render-jobs/{job_id}/download-url", response_model=MediaUrlOut)
+def get_render_job_download_url(
+    project_id: uuid.UUID,
+    job_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = db.get(Project, project_id)
+    if project is None or project.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    job = db.get(RenderJob, job_id)
+    if job is None or job.project_id != project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Render job not found")
+
+    return _media_url(job.output_s3_key)
